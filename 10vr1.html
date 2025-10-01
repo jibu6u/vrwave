@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VR Wave Mixer — 7-point Seed → 10 Overlaid (5 normal + 5 inverted)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0b0d; color:#e5e7eb; font-family:system-ui, sans-serif; }
+  .ui { position:fixed; inset:0 auto auto 0; padding:12px; display:flex; flex-direction:column; gap:10px; width:min(480px, 95vw); background:linear-gradient(180deg, #0b0b0df0, #0b0b0db0 40%, transparent); z-index:10; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  button { padding:8px 14px; border-radius:10px; border:1px solid #3a3a3a; background:#141416; color:#fff; cursor:pointer; }
+  button[disabled] { opacity:.5; cursor:not-allowed; }
+  button:hover:not([disabled]) { background:#1b1d20; }
+  #seedWrap { position:relative; }
+  #seedCanvas { display:block; width:420px; height:220px; background:#000; border:1px dashed #666; border-radius:10px; cursor: crosshair; touch-action:none; }
+  #seedDbg { font:12px/1.2 monospace; color:#cbd5e1; white-space:pre; }
+  .hint { color:#9ca3af; font-size:12px; }
+  .spacer { flex:1 1 auto; }
+  /* VRCanvas is full-window; created by Three.js */
+</style>
+</head>
+<body>
+
+<div class="ui">
+  <div class="row">
+    <button id="btnStart" disabled>Start → Build & Animate</button>
+    <button id="btnReset">Reset</button>
+    <div class="spacer"></div>
+    <div id="seedDbg">7개의 점을 찍어 시드를 만드세요.</div>
+  </div>
+  <div class="row">
+    <div id="seedWrap">
+      <canvas id="seedCanvas" title="여기에 7번 클릭하여 시드 생성"></canvas>
+    </div>
+    <div>Clicks: <b id="clickCount">0</b>/7</div>
+    <button id="btnClearPts">Clear Points</button>
+  </div>
+  <div class="hint">※ 7점을 찍으면 선이 <b>폐곡선</b>(마지막→첫번째)으로 표시됩니다. Start를 누르면 <b>정상 10 · 인버티드 10 생성 → 각각 5개 랜덤 추출</b>하여 <b>총 10개</b>를 한 화면에 오버레이로 보여줍니다. 그 다음 상단의 “Enter VR” 버튼으로 Oculus에서 보세요.</div>
+</div>
+
+<!-- Three.js + WebXR (module) -->
+<script type="module">
+import * as THREE from "https://unpkg.com/three@0.160.1/build/three.module.js";
+import { VRButton } from "https://unpkg.com/three@0.160.1/examples/jsm/webxr/VRButton.js";
+
+const seedCanvas = document.getElementById('seedCanvas');
+const sctx = seedCanvas.getContext('2d');
+const seedDbg = document.getElementById('seedDbg');
+const TX_CNT = document.getElementById('clickCount');
+const BTN_START = document.getElementById('btnStart');
+const BTN_RST = document.getElementById('btnReset');
+const BTN_CLR = document.getElementById('btnClearPts');
+
+const seedCSS = { w:420, h:220 };
+let points = [], seedReady = false;
+
+function resizeSeedCanvasForDPR() {
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  seedCanvas.width = Math.round(seedCSS.w * dpr);
+  seedCanvas.height= Math.round(seedCSS.h * dpr);
+  sctx.setTransform(dpr,0,0,dpr,0,0);
+  drawSeedBoard();
+}
+window.addEventListener('resize', resizeSeedCanvasForDPR);
+
+function drawSeedBoard() {
+  sctx.fillStyle = '#000'; sctx.fillRect(0,0,seedCSS.w,seedCSS.h);
+  sctx.strokeStyle = '#666'; sctx.setLineDash([6,4]);
+  sctx.strokeRect(1,1,seedCSS.w-2, seedCSS.h-2); sctx.setLineDash([]);
+  // points
+  for (const p of points) {
+    sctx.fillStyle = '#ff4d6d';
+    sctx.beginPath(); sctx.arc(p.x, p.y, 5, 0, Math.PI*2); sctx.fill();
+  }
+  if (points.length === 7) {
+    sctx.strokeStyle = '#94a3b8';
+    sctx.lineWidth = 2; sctx.lineCap = 'round'; sctx.lineJoin = 'round';
+    sctx.beginPath();
+    sctx.moveTo(points[0].x, points[0].y);
+    for (let i=1;i<7;i++) sctx.lineTo(points[i].x, points[i].y);
+    sctx.lineTo(points[0].x, points[0].y); // 폐곡선
+    sctx.stroke();
+  }
+  seedDbg.textContent = points.length===7
+    ? "시드 준비 완료. Start를 누르고 VR로 보세요."
+    : "7개의 점을 찍어 시드를 만드세요.";
+}
+function getSeedXY(evt) {
+  const e = evt.touches?.[0] || evt;
+  const rect = seedCanvas.getBoundingClientRect();
+  const sx = seedCSS.w / rect.width, sy = seedCSS.h / rect.height;
+  const x = (e.clientX - rect.left) * sx;
+  const y = (e.clientY - rect.top) * sy;
+  return { x: Math.max(0, Math.min(seedCSS.w, x)), y: Math.max(0, Math.min(seedCSS.h, y)) };
+}
+seedCanvas.addEventListener('pointerdown', e => seedCanvas.setPointerCapture?.(e.pointerId));
+seedCanvas.addEventListener('pointerup', e => {
+  try{ seedCanvas.releasePointerCapture?.(e.pointerId);}catch(_){}
+  if (points.length >= 7) return;
+  const {x,y} = getSeedXY(e);
+  points.push({ x: Math.round(x), y: Math.round(y) });
+  TX_CNT.textContent = String(points.length);
+  if (points.length === 7) { seedReady = true; BTN_START.disabled = false; }
+  drawSeedBoard();
+}, {passive:false});
+BTN_CLR.addEventListener('click', ()=>{
+  points = []; seedReady = false; TX_CNT.textContent = '0';
+  BTN_START.disabled = true; drawSeedBoard();
+});
+
+/* ======= RNG (seed ← 7 points) ======= */
+function fnv1a32_fromPoints(pts) {
+  let h = 0x811c9dc5 >>> 0;
+  for (const p of pts) {
+    const xi=p.x|0, yi=p.y|0;
+    h ^= (xi & 0xff); h = Math.imul(h, 0x01000193);
+    h ^= ((xi>>>8) & 0xff); h = Math.imul(h, 0x01000193);
+    h ^= (yi & 0xff); h = Math.imul(h, 0x01000193);
+    h ^= ((yi>>>8) & 0xff); h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+function mulberry32(seed){ let a=seed>>>0; return function(){ a=(a+0x6D2B79F5)>>>0;
+  let t=Math.imul(a^(a>>>15),(a|1)); t^=t+Math.imul(t^(t>>>7),(t|61)); return ((t^(t>>>14))>>>0)/4294967296; };}
+function laneSeed(seed32, i){ let x=(seed32 ^ (i*0x9E3779B9))>>>0; x^=x<<13; x^=x>>>17; x^=x<<5; return x>>>0; }
+
+/* ======= Wave model (smooth asymmetric sine mix) ======= */
+class Wave {
+  constructor(idx, rng, inverted=false) {
+    this.idx = idx;
+    this.periodPx = 320 + rng()*300; // 320~620
+    // amplitudes scaled to VR world later
+    this.a1 = 0.50 + rng()*0.40;
+    this.a2 = (0.15 + rng()*0.25) * (rng()<0.5?1:0.7);
+    this.a3 = (0.10 + rng()*0.20) * (rng()<0.5?1:0.6);
+    this.p1 = rng()*Math.PI; this.p2 = rng()*Math.PI; this.p3 = rng()*Math.PI;
+    this.bias = (rng()*0.10 - 0.05);
+    this.troughBoost = 1.6 + rng()*2.4; // 1.6~4.0
+    this.hue = Math.floor(rng()*360);
+    this.inverted = inverted;
+    this.phasePx = 0;
+  }
+  base(t){
+    return this.a1*Math.sin(t+this.p1)+this.a2*Math.sin(2*t+this.p2)+this.a3*Math.sin(3*t+this.p3)+this.bias;
+  }
+  asym(v){
+    const alpha = 0.18; // relative
+    const wNeg = 0.5 * (1 - Math.tanh(v/alpha));
+    let out = v * (1 + (this.troughBoost - 1) * wNeg); // deepen negative
+    if (this.inverted) out = -out;
+    return out;
+  }
+  sample(u){ // u: 0..1
+    const t = u * 2*Math.PI;
+    return this.asym(this.base(t));
+  }
+}
+
+/* ======= THREE/WebXR scene ======= */
+let renderer, scene, camera, clock;
+let world;               // group to hold lines
+const LINES = [];        // {mesh, positions, wave}
+const NUM_SAMPLES = 1024;// horizontal resolution
+const WIDTH = 4.0;       // world units (x-range)
+const HEIGHT = 1.8;      // world units (overall y scale)
+
+function setupThree() {
+  renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio||1));
+  renderer.xr.enabled = true;
+  document.body.appendChild(renderer.domElement);
+  document.body.appendChild(VRButton.createButton(renderer));
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b0b0d);
+
+  camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
+  camera.position.set(0, 1.6, 0.5); // user head height-ish
+
+  // room-ish light
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x202025, 0.6);
+  scene.add(hemi);
+
+  // a subtle grid for reference (off)
+  // const grid = new THREE.GridHelper(10, 10, 0x333333, 0x222222);
+  // grid.position.y = 0; scene.add(grid);
+
+  // wave plane in front
+  world = new THREE.Group();
+  world.position.set(0, 1.6, -2.2); // in front of user
+  scene.add(world);
+
+  // faint baseline
+  const baseline = new THREE.Mesh(
+    new THREE.PlaneGeometry(WIDTH, 0.002),
+    new THREE.MeshBasicMaterial({ color:0x30303a })
+  );
+  baseline.position.set(0, 0, 0); world.add(baseline);
+
+  clock = new THREE.Clock();
+
+  window.addEventListener('resize', ()=>{
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+  });
+}
+
+function makeLineMaterial(hue, alpha=1.0) {
+  return new THREE.LineBasicMaterial({
+    color: new THREE.Color(`hsl(${hue},100%,60%)`),
+    transparent: alpha < 1.0,
+    opacity: alpha,
+    linewidth: 2 // mostly ignored on many platforms; kept for completeness
+  });
+}
+function createWaveLine(wave, alpha=1.0){
+  const geom = new THREE.BufferGeometry();
+  const positions = new Float32Array(NUM_SAMPLES * 3);
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const mat = makeLineMaterial(wave.hue, alpha);
+  const line = new THREE.Line(geom, mat);
+  line.frustumCulled = false;
+  world.add(line);
+  return { mesh: line, positions, wave };
+}
+function updateLinePositions(entry, timePhase){
+  const { positions, wave } = entry;
+  // map x from -WIDTH/2..+WIDTH/2; y from samples
+  for (let i=0;i<NUM_SAMPLES;i++){
+    const u = i/(NUM_SAMPLES-1);             // 0..1
+    const x = -WIDTH/2 + u*WIDTH;
+    // animate scroll by adding phase in "u"
+    const uPhase = (u + timePhase) % 1.0;
+    const y = wave.sample(uPhase) * (HEIGHT*0.5); // scale to world height
+    const j = i*3;
+    positions[j  ] = x;
+    positions[j+1] = y;
+    positions[j+2] = 0;
+  }
+}
+
+function clearWorld() {
+  for (const e of LINES) {
+    world.remove(e.mesh);
+    e.mesh.geometry.dispose();
+    e.mesh.material.dispose();
+  }
+  LINES.length = 0;
+}
+
+/* ======= Build 20 (10 normal + 10 inverted), pick 5+5 random, overlay ======= */
+function buildMixedOverlayFromSeed(){
+  clearWorld();
+  const seed32 = fnv1a32_fromPoints(points);
+  // build 10 normals and 10 inverteds
+  const normals   = [];
+  const inverteds = [];
+  for (let i=0;i<10;i++){
+    const r1 = mulberry32(laneSeed(seed32, i));
+    const r2 = mulberry32(laneSeed(seed32, i+97));
+    normals.push(   new Wave(i, r1, false));
+    inverteds.push( new Wave(i, r2, true ));
+  }
+  // pick 5 random unique from each
+  function pick5(arr, rnd) {
+    const idx = arr.map((_,i)=>i);
+    for (let i=idx.length-1;i>0;i--) {
+      const j = Math.floor(rnd()* (i+1));
+      [idx[i], idx[j]] = [idx[j], idx[i]];
+    }
+    return idx.slice(0,5).map(i=>arr[i]);
+  }
+  const rPick1 = mulberry32(seed32 ^ 0xabc12345);
+  const rPick2 = mulberry32(seed32 ^ 0x13579bdf);
+  const chosen = [...pick5(normals, rPick1), ...pick5(inverteds, rPick2)];
+
+  // create lines (slightly different alpha for visual depth)
+  for (let k=0;k<chosen.length;k++){
+    const w = chosen[k];
+    const alpha = 1.0 - (k*0.03); // 앞쪽/뒤쪽 구분용 살짝 투명차
+    const entry = createWaveLine(w, Math.max(0.6, alpha));
+    LINES.push(entry);
+  }
+}
+
+/* ======= Animate (WebXR) ======= */
+let running = false;
+function startAnimation(){
+  if (running) return;
+  running = true;
+  renderer.setAnimationLoop(()=> {
+    const dt = clock.getDelta();
+    // scroll speed in px/frame → convert to phase per second
+    // 여기서는 "한 주기(2π)"에 해당하는 u=1.0을 기준으로 0.08~0.12 정도가 보기 좋음
+    const speed = 0.10; // phase per second
+    const t = performance.now()*0.001;
+    // 각 wave는 개별 period를 가지므로 uPhase를 per-wave로 보정할 필요는 없음
+    for (const e of LINES) {
+      const uPhase = (e.wave.phasePx*0.000) + (t*speed) % 1.0; // phasePx는 의미상 남겨둠
+      updateLinePositions(e, uPhase);
+      e.mesh.geometry.attributes.position.needsUpdate = true;
+    }
+    renderer.render(scene, camera);
+  });
+}
+function stopAnimation(){
+  running = false;
+  renderer.setAnimationLoop(null);
+}
+
+/* ======= UI hooks ======= */
+document.getElementById('btnStart').addEventListener('click', ()=>{
+  if (!seedReady || points.length!==7) { alert('먼저 Seed 캔버스에 정확히 7점을 찍어주세요.'); return; }
+  buildMixedOverlayFromSeed();   // 정상 5 + 인버티드 5 선택 및 생성
+  startAnimation();              // 애니메이션 시작
+});
+document.getElementById('btnReset').addEventListener('click', ()=>{
+  stopAnimation();
+  clearWorld();
+  points=[]; seedReady=false; TX_CNT.textContent='0'; BTN_START.disabled=true; drawSeedBoard();
+});
+
+/* ======= init ======= */
+function init() {
+  resizeSeedCanvasForDPR();
+  setupThree();
+}
+init();
+</script>
+</body>
+</html>
