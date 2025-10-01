@@ -3,46 +3,70 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>VR Wave Mixer — Seed Input Safe Mode (Oculus/WebXR)</title>
+<title>VR Wave Mixer — 통합본 (Oculus/WebXR)</title>
 <style>
   :root { color-scheme: dark; }
   html, body { height:100%; }
   body { margin:0; background:#0b0b0d; color:#e5e7eb; font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
 
+  /* UI 패널 (항상 WebGL 위) */
   .ui {
     position: fixed; left: 0; top: 0; z-index: 10;
-    width: min(580px, 96vw);
+    width: min(600px, 96vw);
     padding: 12px;
     display: flex; flex-direction: column; gap: 10px;
     background: linear-gradient(180deg, #0b0b0deb, #0b0b0db3 40%, transparent);
+    pointer-events: auto;
   }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  button { padding:8px 12px; border-radius:10px; border:1px solid #3a3a3a; background:#141416; color:#fff; cursor:pointer; }
+  button {
+    padding:8px 12px; border-radius:10px;
+    border:1px solid #3a3a3a; background:#141416; color:#fff; cursor:pointer;
+  }
   button[disabled] { opacity:.5; cursor:not-allowed; }
   button:hover:not([disabled]) { background:#1b1d20; }
 
   #seedWrap { position:relative; display:inline-block; }
   #seedCanvas {
-    display:block; width:420px; height:220px;
+    display:block; width:420px; height:220px;        /* 레이아웃 크기 */
     background:#000; border:1px dashed #666; border-radius:10px;
     cursor: crosshair; touch-action:none; pointer-events:auto;
   }
   #seedDbg, #eventDbg { font:12px/1.35 monospace; color:#cbd5e1; white-space:pre; }
   .hint { color:#9ca3af; font-size:12px; }
 
+  /* WebGL 캔버스는 화면 전체 뒤쪽 */
   canvas.webgl {
     position: fixed; inset: 0; z-index: 0; display:block;
     width:100vw !important; height:100vh !important;
+  }
+
+  /* 🎯 풀스크린 시드 오버레이 */
+  #seedFSOverlay {
+    position:fixed; inset:0; z-index:999999; display:none;
+    background:rgba(0,0,0,0.92); align-items:center; justify-content:center;
+  }
+  #seedFS {
+    width: min(95vw, 1200px);
+    height: min(70vh, 700px);
+    border:1px dashed #888; border-radius:12px;
+    background:#000; touch-action:none; cursor:crosshair;
+  }
+  #seedFSHelp {
+    position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
+    color:#cbd5e1; font:14px/1.4 system-ui; text-align:center;
   }
 </style>
 </head>
 <body>
 
+<!-- UI -->
 <div class="ui">
   <div class="row">
     <button id="btnStart" disabled>Start</button>
     <button id="btnReset">Reset</button>
     <button id="btnInputFix">🛠️ 입력 안됨 해결: OFF</button>
+    <button id="btnSeedFS">🎯 Seed 풀스크린</button>
     <button id="btnAuto7">🎲 7점 자동생성</button>
     <div style="flex:1 1 auto;"></div>
     <div>
@@ -60,11 +84,21 @@
   </div>
 
   <div class="hint">
-    7점이 찍히면 폐곡선을 보여주고 Start가 활성화됩니다. <b>안 찍히면</b> 먼저
-    <b>‘입력 안됨 해결’</b>을 켠 뒤 다시 시도하세요. 그래도 안 되면 <b>‘7점 자동생성’</b>으로 진행 가능합니다.
+    7점이 찍히면 폐곡선을 표시하고 Start가 활성화됩니다. 안 찍히면 <b>‘입력 안됨 해결’</b>을 켠 뒤 다시 시도하거나,
+    <b>‘🎯 Seed 풀스크린’</b>으로 전체화면 입력을 사용하세요. 최후에는 <b>‘7점 자동생성’</b>으로 진행 가능합니다.
   </div>
 </div>
 
+<!-- 🎯 풀스크린 Seed 입력 오버레이 -->
+<div id="seedFSOverlay">
+  <canvas id="seedFS"></canvas>
+  <div id="seedFSHelp">
+    <b>풀스크린 Seed 입력</b> — 화면을 탭/클릭하면 점이 찍힙니다.<br/>
+    조준점 이동: WASD/화살표 · 찍기: Enter/Space · 취소: Esc · 완료(7점): 자동종료
+  </div>
+</div>
+
+<!-- Three.js + WebXR + 굵은 라인(Line2) -->
 <script type="module">
 import * as THREE from "https://unpkg.com/three@0.160.1/build/three.module.js";
 import { VRButton } from "https://unpkg.com/three@0.160.1/examples/jsm/webxr/VRButton.js";
@@ -72,7 +106,7 @@ import { Line2 } from "https://unpkg.com/three@0.160.1/examples/jsm/lines/Line2.
 import { LineMaterial } from "https://unpkg.com/three@0.160.1/examples/jsm/lines/LineMaterial.js";
 import { LineGeometry } from "https://unpkg.com/three@0.160.1/examples/jsm/lines/LineGeometry.js";
 
-/* ========== Seed 캔버스 (안전 입력) ========== */
+/* ========== Seed 캔버스 ========== */
 const seedWrap = document.getElementById('seedWrap');
 const seedCanvas = document.getElementById('seedCanvas');
 const sctx = seedCanvas.getContext('2d', { alpha:false });
@@ -85,6 +119,7 @@ const BTN_RST   = document.getElementById('btnReset');
 const BTN_CLR   = document.getElementById('btnClearPts');
 const BTN_FIX   = document.getElementById('btnInputFix');
 const BTN_AUTO7 = document.getElementById('btnAuto7');
+const BTN_SEED_FS = document.getElementById('btnSeedFS');
 
 let points = [], seedReady = false;
 let flashAt = null, lastAddTs = 0;
@@ -104,7 +139,7 @@ function syncCanvasSize() {
     seedCanvas.width  = w;
     seedCanvas.height = h;
   }
-  sctx.setTransform(dpr,0,0,dpr,0,0); // CSS 좌표계=그리기 좌표계
+  sctx.setTransform(dpr,0,0,dpr,0,0); // CSS 좌표계 == 그리기 좌표계
   drawSeedBoard();
   updateEventDbg('-', '-', '-', rect);
 }
@@ -185,7 +220,6 @@ document.addEventListener('touchend',    e=>{ const t=e.changedTouches?.[0]; if(
 /* 비상 기능 */
 BTN_FIX.addEventListener('click', ()=>{
   inputFixOn = !inputFixOn;
-  // WebGL 캔버스가 입력을 가로채는 경우 차단
   const gl = document.querySelector('canvas.webgl');
   if (gl) gl.style.pointerEvents = inputFixOn ? 'none' : 'auto';
   BTN_FIX.textContent = `🛠️ 입력 안됨 해결: ${inputFixOn ? 'ON' : 'OFF'}`;
@@ -205,7 +239,110 @@ BTN_CLR.addEventListener('click', ()=>{
   points = []; TX_CNT.textContent = '0'; seedReady = false; BTN_START.disabled = true; drawSeedBoard();
 });
 
-/* ========== RNG & Wave & WebXR (이전과 동일 로직, 요약) ========== */
+/* ========== 🎯 풀스크린 Seed 입력 ========== */
+const seedFSOverlay = document.getElementById('seedFSOverlay');
+const seedFS = document.getElementById('seedFS');
+const fsCtx = seedFS.getContext('2d', { alpha:false });
+let fsCursor = { x: 0.5, y: 0.5 }; // 0..1
+let fsActive = false;
+
+const glCanvas = () => document.querySelector('canvas.webgl');
+
+function openSeedFS() {
+  const gl = glCanvas(); if (gl) gl.style.visibility = 'hidden';
+  seedFSOverlay.style.display = 'flex';
+  fsActive = true;
+  resizeSeedFS();
+  drawSeedFS();
+}
+function closeSeedFS() {
+  fsActive = false;
+  seedFSOverlay.style.display = 'none';
+  const gl = glCanvas(); if (gl) gl.style.visibility = 'visible';
+  drawSeedBoard();
+}
+function resizeSeedFS() {
+  if (!fsActive) return;
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const rect = seedFS.getBoundingClientRect();
+  seedFS.width  = Math.max(2, Math.round(rect.width  * dpr));
+  seedFS.height = Math.max(2, Math.round(rect.height * dpr));
+  fsCtx.setTransform(dpr,0,0,dpr,0,0);
+}
+function drawSeedFS() {
+  if (!fsActive) return;
+  const rect = seedFS.getBoundingClientRect();
+  fsCtx.fillStyle = '#000'; fsCtx.fillRect(0,0,rect.width,rect.height);
+  fsCtx.strokeStyle = '#444'; fsCtx.setLineDash([8,6]);
+  fsCtx.strokeRect(1,1,rect.width-2,rect.height-2); fsCtx.setLineDash([]);
+
+  for (const p of points) {
+    fsCtx.fillStyle = '#ff4d6d';
+    fsCtx.beginPath(); fsCtx.arc(p.x, p.y, 6, 0, Math.PI*2); fsCtx.fill();
+  }
+  if (points.length === 7) {
+    fsCtx.strokeStyle = '#94a3b8'; fsCtx.lineWidth = 2; fsCtx.lineCap='round'; fsCtx.lineJoin='round';
+    fsCtx.beginPath(); fsCtx.moveTo(points[0].x, points[0].y);
+    for (let i=1;i<7;i++) fsCtx.lineTo(points[i].x, points[i].y);
+    fsCtx.lineTo(points[0].x, points[0].y); fsCtx.stroke();
+  }
+
+  const cx = fsCursor.x * rect.width;
+  const cy = fsCursor.y * rect.height;
+  fsCtx.strokeStyle = '#ffd166';
+  fsCtx.lineWidth = 1.5;
+  fsCtx.beginPath(); fsCtx.arc(cx, cy, 12, 0, Math.PI*2); fsCtx.stroke();
+  fsCtx.beginPath(); fsCtx.moveTo(cx-16, cy); fsCtx.lineTo(cx+16, cy); fsCtx.stroke();
+  fsCtx.beginPath(); fsCtx.moveTo(cx, cy-16); fsCtx.lineTo(cx, cy+16); fsCtx.stroke();
+}
+
+function fsAddPointAtClient(clientX, clientY) {
+  const rect = seedFS.getBoundingClientRect();
+  const x = Math.max(0, Math.min(rect.width,  clientX - rect.left));
+  const y = Math.max(0, Math.min(rect.height, clientY - rect.top));
+  points.push({ x: Math.round(x), y: Math.round(y) });
+  TX_CNT.textContent = String(points.length);
+  if (points.length === 7) { seedReady = true; BTN_START.disabled = false; closeSeedFS(); }
+  drawSeedFS();
+}
+function fsAddPointAtCursor() {
+  const rect = seedFS.getBoundingClientRect();
+  const x = Math.round(fsCursor.x * rect.width);
+  const y = Math.round(fsCursor.y * rect.height);
+  points.push({ x, y });
+  TX_CNT.textContent = String(points.length);
+  if (points.length === 7) { seedReady = true; BTN_START.disabled = false; closeSeedFS(); }
+  drawSeedFS();
+}
+
+BTN_SEED_FS.addEventListener('click', openSeedFS);
+window.addEventListener('resize', ()=>{ if (fsActive) { resizeSeedFS(); drawSeedFS(); } });
+
+seedFS.addEventListener('pointerdown', e=>{ e.preventDefault(); fsAddPointAtClient(e.clientX, e.clientY); }, {passive:false});
+seedFS.addEventListener('touchstart',  e=>{ e.preventDefault(); const t=e.changedTouches?.[0]; if(t) fsAddPointAtClient(t.clientX, t.clientY); }, {passive:false});
+seedFS.addEventListener('pointermove', e=>{
+  const rect = seedFS.getBoundingClientRect();
+  fsCursor.x = Math.max(0, Math.min(1, (e.clientX - rect.left)/rect.width));
+  fsCursor.y = Math.max(0, Math.min(1, (e.clientY - rect.top)/rect.height));
+  drawSeedFS();
+});
+window.addEventListener('keydown', e=>{
+  if (!fsActive) return;
+  const step = (e.shiftKey ? 0.04 : 0.02);
+  let used = true;
+  switch (e.key) {
+    case 'ArrowLeft': case 'a': case 'A': fsCursor.x = Math.max(0, fsCursor.x - step); break;
+    case 'ArrowRight': case 'd': case 'D': fsCursor.x = Math.min(1, fsCursor.x + step); break;
+    case 'ArrowUp': case 'w': case 'W': fsCursor.y = Math.max(0, fsCursor.y - step); break;
+    case 'ArrowDown': case 's': case 'S': fsCursor.y = Math.min(1, fsCursor.y + step); break;
+    case 'Enter': case ' ': fsAddPointAtCursor(); break;
+    case 'Escape': closeSeedFS(); break;
+    default: used = false;
+  }
+  if (used) { e.preventDefault(); drawSeedFS(); }
+});
+
+/* ========== RNG & Wave & WebXR ========== */
 function fnv1a32_fromPoints(pts){ let h=0x811c9dc5>>>0; for(const p of pts){ const xi=p.x|0, yi=p.y|0;
   h^=(xi&0xff); h=Math.imul(h,0x01000193); h^=((xi>>>8)&0xff); h=Math.imul(h,0x01000193);
   h^=(yi&0xff); h=Math.imul(h,0x01000193); h^=((yi>>>8)&0xff); h=Math.imul(h,0x01000193);} return h>>>0; }
@@ -213,14 +350,17 @@ function mulberry32(seed){ let a=seed>>>0; return function(){ a=(a+0x6D2B79F5)>>
   let t=Math.imul(a^(a>>>15),(a|1)); t^=t+Math.imul(t^(t>>>7),(t|61)); return ((t^(t>>>14))>>>0)/4294967296; }; }
 function laneSeed(seed32,i){ let x=(seed32^(i*0x9E3779B9))>>>0; x^=x<<13; x^=x>>>17; x^=x<<5; return x>>>0; }
 
-class Wave{
-  constructor(idx, rng, inv=false){
-    this.idx=idx; this.periodPx=380+rng()*280;
-    this.a1=0.50+rng()*0.25;
-    this.a2=(0.08+rng()*0.10)*(rng()<0.7?1:0.6);
-    this.a3=(rng()<0.35)?(0.04+rng()*0.06):0;
-    this.p1=rng()*Math.PI; this.p2=this.p1*0.5+rng()*0.6; this.p3=this.p1*0.33+rng()*0.6;
-    this.bias=(rng()*0.06-0.03); this.troughBoost=1.3+rng()*0.9; this.hue=Math.floor(rng()*360);
+class Wave {
+  constructor(idx, rng, inv=false) {
+    this.idx=idx;
+    this.periodPx=380 + rng()*280;            // 길게 → 우아
+    this.a1=0.50 + rng()*0.25;                // 1× 중심
+    this.a2=(0.08 + rng()*0.10)*(rng()<0.7?1:0.6); // 2× 약하게
+    this.a3=(rng()<0.35)?(0.04 + rng()*0.06):0;    // 3× 가끔만
+    this.p1=rng()*Math.PI; this.p2=this.p1*0.5 + rng()*0.6; this.p3=this.p1*0.33 + rng()*0.6;
+    this.bias=(rng()*0.06 - 0.03);
+    this.troughBoost=1.3 + rng()*0.9;         // 과도하지 않게
+    this.hue=Math.floor(rng()*360);
     this.inv=inv;
   }
   base(t){ return this.a1*Math.sin(t+this.p1)+this.a2*Math.sin(2*t+this.p2)+this.a3*Math.sin(3*t+this.p3)+this.bias; }
@@ -228,7 +368,6 @@ class Wave{
   sample(u){ return this.asym(this.base(u*2*Math.PI)); }
 }
 
-/* WebXR/Three */
 let renderer, scene, camera, world;
 const LINES=[]; const NUM_SAMPLES=1024; const WIDTH=4.2; const HEIGHT=1.6;
 let materialResolution=new THREE.Vector2();
@@ -247,8 +386,8 @@ function setupThree(){
   scene.add(new THREE.HemisphereLight(0xffffff, 0x202025, 0.7));
   world=new THREE.Group(); world.position.set(0,1.6,-2.2); scene.add(world);
 
-  const baseline=new THREE.Mesh(new THREE.PlaneGeometry(WIDTH,0.004), new THREE.MeshBasicMaterial({color:0x2b2b33}));
-  world.add(baseline);
+  // 중앙선
+  world.add(new THREE.Mesh(new THREE.PlaneGeometry(WIDTH,0.004), new THREE.MeshBasicMaterial({color:0x2b2b33})));
 
   function onResize(){
     renderer.setSize(innerWidth, innerHeight);
@@ -259,43 +398,67 @@ function setupThree(){
   addEventListener('resize', onResize); onResize();
 }
 
-function makeLineMaterial(h, a=1.0){ const m=new LineMaterial({
-  color:new THREE.Color(`hsl(${h},100%,60%)`).getHex(), linewidth:0.02, transparent:a<1, opacity:a, depthTest:true
-}); m.resolution.copy(materialResolution); return m; }
-
-function createWaveLine(w, a=1.0){ const g=new LineGeometry(); const arr=new Float32Array(NUM_SAMPLES*3);
+function makeLineMaterial(h, a=1.0){
+  const m=new LineMaterial({ color:new THREE.Color(`hsl(${h},100%,60%)`).getHex(),
+    linewidth:0.02, transparent:a<1, opacity:a, depthTest:true });
+  m.resolution.copy(materialResolution);
+  return m;
+}
+function createWaveLine(w, a=1.0){
+  const g=new LineGeometry(); const arr=new Float32Array(NUM_SAMPLES*3);
   g.setPositions(arr); const mat=makeLineMaterial(w.hue, a); const line=new Line2(g,mat); line.computeLineDistances(); world.add(line);
-  return {mesh:line, geometry:g, positions:arr, material:mat, wave:w}; }
-
-function updateLinePositions(e, phase){ const {positions, geometry, wave}=e;
-  for(let i=0;i<NUM_SAMPLES;i++){ const u=i/(NUM_SAMPLES-1); const x=-WIDTH/2+u*WIDTH; const y=wave.sample((u+phase)%1)* (HEIGHT*0.5);
-    const j=i*3; positions[j]=x; positions[j+1]=y; positions[j+2]=0; } geometry.setPositions(positions); }
-
+  return {mesh:line, geometry:g, positions:arr, material:mat, wave:w};
+}
+function updateLinePositions(e, phase){
+  const {positions, geometry, wave}=e;
+  for(let i=0;i<NUM_SAMPLES;i++){
+    const u=i/(NUM_SAMPLES-1);
+    const x=-WIDTH/2 + u*WIDTH;
+    const y=wave.sample((u+phase)%1) * (HEIGHT*0.5);
+    const j=i*3; positions[j]=x; positions[j+1]=y; positions[j+2]=0;
+  }
+  geometry.setPositions(positions);
+}
 function clearWorld(){ for(const e of LINES){ world.remove(e.mesh); e.geometry.dispose(); e.material.dispose(); } LINES.length=0; }
 
 class WaveFactory{
-  constructor(sd){ this.sd=sd; this.norm=[]; this.inv=[];
-    for(let i=0;i<10;i++){ this.norm.push(new Wave(i, mulberry32(laneSeed(sd,i)), false)); this.inv.push(new Wave(i, mulberry32(laneSeed(sd,i+97)), true)); }}
-  pick(arr,r,n=5){ const idx=arr.map((_,i)=>i); for(let i=idx.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [idx[i],idx[j]]=[idx[j],idx[i]]; } return idx.slice(0,n).map(i=>arr[i]); }
-  build(){ clearWorld(); const r1=mulberry32(this.sd^0xabc12345), r2=mulberry32(this.sd^0x13579bdf);
+  constructor(sd){
+    this.sd=sd; this.norm=[]; this.inv=[];
+    for(let i=0;i<10;i++){ this.norm.push(new Wave(i, mulberry32(laneSeed(sd,i)), false)); this.inv.push(new Wave(i, mulberry32(laneSeed(sd,i+97)), true)); }
+  }
+  pick(arr,r,n=5){ const idx=arr.map((_,i)=>i);
+    for(let i=idx.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [idx[i],idx[j]]=[idx[j],idx[i]]; }
+    return idx.slice(0,n).map(i=>arr[i]);
+  }
+  build(){
+    clearWorld();
+    const r1=mulberry32(this.sd^0xabc12345), r2=mulberry32(this.sd^0x13579bdf);
     const chosen=[...this.pick(this.norm,r1,5), ...this.pick(this.inv,r2,5)];
-    chosen.forEach((w,k)=>{ const a=Math.max(0.6, 0.9-k*0.02); LINES.push(createWaveLine(w,a)); });
+    chosen.forEach((w,k)=>{ const a=Math.max(0.6, 0.9 - k*0.02); LINES.push(createWaveLine(w,a)); });
   }
 }
 
-let running=false, factory=null;
-function startAnimation(){ if(running) return; running=true;
-  renderer.setAnimationLoop(()=>{ const t=performance.now()*0.001; const phase=(t*0.075)%1.0; for(const e of LINES) updateLinePositions(e,phase); renderer.render(scene,camera); });
+/* 애니메이션 */
+let running=false;
+function startAnimation(){
+  if(running) return; running=true;
+  renderer.setAnimationLoop(()=>{
+    const t=performance.now()*0.001;
+    const phase=(t*0.075)%1.0; // 우아한 속도
+    for(const e of LINES) updateLinePositions(e, phase);
+    renderer.render(scene, camera);
+  });
 }
 function stopAnimation(){ running=false; renderer.setAnimationLoop(null); }
 
 /* UI 동작 */
-BTN_START.addEventListener('click', ()=>{
+document.getElementById('btnStart').addEventListener('click', ()=>{
   if (!seedReady || points.length!==7) { alert('먼저 7점을 찍어주세요.'); return; }
   const seed32 = fnv1a32_fromPoints(points);
-  factory = new WaveFactory(seed32); factory.build(); startAnimation();
+  const factory = new WaveFactory(seed32);
+  factory.build(); startAnimation();
 });
-BTN_RST.addEventListener('click', ()=>{
+document.getElementById('btnReset').addEventListener('click', ()=>{
   stopAnimation(); clearWorld(); points=[]; seedReady=false; TX_CNT.textContent='0'; BTN_START.disabled=true; drawSeedBoard();
 });
 
