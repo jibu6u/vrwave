@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>VR Wave Mixer — 7-point Seed → Mix 10 (Oculus/WebXR)</title>
+<title>VR Wave Mixer — 7-point Seed (Bulletproof Input) → Mix 10 (Oculus/WebXR)</title>
 <style>
   :root { color-scheme: dark; }
   html, body { height:100%; }
@@ -12,7 +12,7 @@
   /* UI 패널 (항상 WebGL 위) */
   .ui {
     position: fixed; left: 0; top: 0; z-index: 10;
-    width: min(520px, 96vw);
+    width: min(560px, 96vw);
     padding: 12px;
     display: flex; flex-direction: column; gap: 10px;
     background: linear-gradient(180deg, #0b0b0deb, #0b0b0db3 40%, transparent);
@@ -27,11 +27,11 @@
   button:hover:not([disabled]) { background:#1b1d20; }
   #seedWrap { position:relative; }
   #seedCanvas {
-    display:block; width:420px; height:220px;
+    display:block; width:420px; height:220px;  /* 초기 레이아웃만, 내부 픽셀은 동적으로 맞춤 */
     background:#000; border:1px dashed #666; border-radius:10px;
     cursor: crosshair; touch-action: none; pointer-events: auto;
   }
-  #seedDbg { font:12px/1.2 monospace; color:#cbd5e1; white-space:pre; }
+  #seedDbg, #eventDbg { font:12px/1.35 monospace; color:#cbd5e1; white-space:pre; }
   .hint { color:#9ca3af; font-size:12px; }
 
   /* WebGL 캔버스는 화면 전체 뒤쪽 */
@@ -49,7 +49,10 @@
     <button id="btnStart" disabled>Start → Build & Animate</button>
     <button id="btnReset">Reset</button>
     <div style="flex:1 1 auto;"></div>
-    <div id="seedDbg">7개의 점을 찍어 시드를 만드세요.</div>
+    <div>
+      <div id="seedDbg">7개의 점을 찍어 시드를 만드세요.</div>
+      <div id="eventDbg">event: - / x:- y:- / rect: -</div>
+    </div>
   </div>
   <div class="row">
     <div id="seedWrap">
@@ -73,37 +76,48 @@ import { Line2 } from "https://unpkg.com/three@0.160.1/examples/jsm/lines/Line2.
 import { LineMaterial } from "https://unpkg.com/three@0.160.1/examples/jsm/lines/LineMaterial.js";
 import { LineGeometry } from "https://unpkg.com/three@0.160.1/examples/jsm/lines/LineGeometry.js";
 
-/* ---------- Seed UI ---------- */
+/* ---------- Seed UI (입력 초탄착 보장) ---------- */
 const seedCanvas = document.getElementById('seedCanvas');
 const sctx = seedCanvas.getContext('2d');
 const seedDbg = document.getElementById('seedDbg');
+const eventDbg = document.getElementById('eventDbg');
 const TX_CNT = document.getElementById('clickCount');
 const BTN_START = document.getElementById('btnStart');
 const BTN_RST = document.getElementById('btnReset');
 const BTN_CLR = document.getElementById('btnClearPts');
 
-const seedCSS = { w:420, h:220 };
 let points = [], seedReady = false;
+let flashAt = null; // 클릭 하이라이트
+let lastAddTs = 0;
 
-// 하이라이트 효과용 플래그
-let flashAt = null; // {x,y, until}
+// ★ 캔버스 내부 픽셀 크기를 "보이는 크기 × DPR"에 항상 맞춤
+const ro = new ResizeObserver(syncCanvasSize);
+ro.observe(seedCanvas);
+window.addEventListener('resize', syncCanvasSize);
+syncCanvasSize();
 
-function resizeSeedCanvasForDPR() {
+function syncCanvasSize() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
-  seedCanvas.width = Math.round(seedCSS.w * dpr);
-  seedCanvas.height= Math.round(seedCSS.h * dpr);
-  sctx.setTransform(dpr,0,0,dpr,0,0);
+  const rect = seedCanvas.getBoundingClientRect();
+  const w = Math.max(2, Math.round(rect.width  * dpr));
+  const h = Math.max(2, Math.round(rect.height * dpr));
+  if (seedCanvas.width !== w || seedCanvas.height !== h) {
+    seedCanvas.width = w;
+    seedCanvas.height = h;
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0); // 뷰 좌표계=CSS 좌표계
+  }
   drawSeedBoard();
+  updateEventDbg('-', '-', '-', rect);
 }
-window.addEventListener('resize', resizeSeedCanvasForDPR);
 
 function drawSeedBoard() {
-  sctx.fillStyle = '#000'; sctx.fillRect(0,0,seedCSS.w,seedCSS.h);
+  const rect = seedCanvas.getBoundingClientRect();
+  sctx.fillStyle = '#000'; sctx.fillRect(0,0,rect.width, rect.height);
   sctx.strokeStyle = '#666'; sctx.setLineDash([6,4]);
-  sctx.strokeRect(1,1,seedCSS.w-2, seedCSS.h-2);
+  sctx.strokeRect(1,1,rect.width-2, rect.height-2);
   sctx.setLineDash([]);
 
-  // 기존 점
+  // 점들
   for (const p of points) {
     sctx.fillStyle = '#ff4d6d';
     sctx.beginPath(); sctx.arc(p.x, p.y, 5, 0, Math.PI*2); sctx.fill();
@@ -111,15 +125,13 @@ function drawSeedBoard() {
 
   // 클릭 하이라이트(0.2초)
   if (flashAt && performance.now() < flashAt.until) {
-    sctx.strokeStyle = '#ffd166';
-    sctx.lineWidth = 2;
+    sctx.strokeStyle = '#ffd166'; sctx.lineWidth = 2;
     sctx.beginPath(); sctx.arc(flashAt.x, flashAt.y, 10, 0, Math.PI*2); sctx.stroke();
     requestAnimationFrame(drawSeedBoard);
   } else {
     flashAt = null;
   }
 
-  // 7점이면 폐곡선
   if (points.length === 7) {
     sctx.strokeStyle = '#94a3b8';
     sctx.lineWidth = 2; sctx.lineCap='round'; sctx.lineJoin='round';
@@ -133,35 +145,55 @@ function drawSeedBoard() {
     seedDbg.textContent = "7개의 점을 찍어 시드를 만드세요.";
   }
 }
-function getSeedXY_client(clientX, clientY) {
-  const rect = seedCanvas.getBoundingClientRect();
-  const sx = seedCSS.w / rect.width, sy = seedCSS.h / rect.height;
-  const x = (clientX - rect.left) * sx;
-  const y = (clientY - rect.top) * sy;
-  return { x: Math.max(0, Math.min(seedCSS.w, x)), y: Math.max(0, Math.min(seedCSS.h, y)) };
+
+function withinRect(x, y, rect) {
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
-// ✅ 초탄착 보장: pointerdown/mousedown/click/touchstart/touchend 전부 수집 (중복 방지)
-let lastAddTs = 0;
-function tryAddPoint(clientX, clientY){
+function clientToCanvas(x, y, rect) {
+  // sctx는 setTransform으로 CSS 좌표계==그리기 좌표계이므로 rect 기준 좌표만 넣으면 됨
+  return { x: Math.max(0, Math.min(rect.width,  x - rect.left)),
+           y: Math.max(0, Math.min(rect.height, y - rect.top )) };
+}
+
+function updateEventDbg(type, x, y, rect) {
+  const rtxt = rect ? `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}×${Math.round(rect.height)}` : '-';
+  eventDbg.textContent = `event: ${type} / x:${x} y:${y} / rect: ${rtxt}`;
+}
+
+function tryAddPointFromClient(clientX, clientY, typeLabel='-') {
   const now = performance.now();
-  if (now - lastAddTs < 50) return; // 같은 입력의 중복 방지(50ms)
-  if (points.length >= 7) return;
-  const {x,y} = getSeedXY_client(clientX, clientY);
+  if (now - lastAddTs < 50) return; // 중복 방지
+  const rect = seedCanvas.getBoundingClientRect();
+  if (!withinRect(clientX, clientY, rect)) return;
+
+  const { x, y } = clientToCanvas(clientX, clientY, rect);
   points.push({ x: Math.round(x), y: Math.round(y) });
   TX_CNT.textContent = String(points.length);
   flashAt = { x, y, until: now + 200 };
-  if (points.length === 7) { seedReady = true; BTN_START.disabled = false; }
+  updateEventDbg(typeLabel, Math.round(x), Math.round(y), rect);
+
+  if (points.length === 7) {
+    seedReady = true; BTN_START.disabled = false;
+  }
   lastAddTs = now;
   drawSeedBoard();
 }
 
-// 모든 입력 경로 연결
-seedCanvas.addEventListener('pointerdown', (e)=>{ e.preventDefault(); tryAddPoint(e.clientX, e.clientY); }, {passive:false});
-seedCanvas.addEventListener('mousedown',    (e)=>{ e.preventDefault(); tryAddPoint(e.clientX, e.clientY); }, {passive:false});
-seedCanvas.addEventListener('click',        (e)=>{ e.preventDefault(); tryAddPoint(e.clientX, e.clientY); }, {passive:false});
-seedCanvas.addEventListener('touchstart',   (e)=>{ if (e.changedTouches?.length){ const t=e.changedTouches[0]; tryAddPoint(t.clientX, t.clientY); e.preventDefault(); }}, {passive:false});
-seedCanvas.addEventListener('touchend',     (e)=>{ if (e.changedTouches?.length){ const t=e.changedTouches[0]; tryAddPoint(t.clientX, t.clientY); e.preventDefault(); }}, {passive:false});
+/* —— 이벤트 수집 (타겟 + 전역 백업) —— */
+// 타겟: 씨드 캔버스 직접
+seedCanvas.addEventListener('pointerdown', (e)=>{ e.preventDefault(); tryAddPointFromClient(e.clientX, e.clientY, 'pointerdown'); }, {passive:false});
+seedCanvas.addEventListener('mousedown',    (e)=>{ e.preventDefault(); tryAddPointFromClient(e.clientX, e.clientY, 'mousedown'); }, {passive:false});
+seedCanvas.addEventListener('click',        (e)=>{ e.preventDefault(); tryAddPointFromClient(e.clientX, e.clientY, 'click'); }, {passive:false});
+seedCanvas.addEventListener('touchstart',   (e)=>{ if (e.changedTouches?.length){ const t=e.changedTouches[0]; tryAddPointFromClient(t.clientX, t.clientY, 'touchstart'); e.preventDefault(); }}, {passive:false});
+seedCanvas.addEventListener('touchend',     (e)=>{ if (e.changedTouches?.length){ const t=e.changedTouches[0]; tryAddPointFromClient(t.clientX, t.clientY, 'touchend'); e.preventDefault(); }}, {passive:false});
+
+// 전역 백업: 어떤 요소가 타겟을 가려도 rect 내부 클릭이면 수집
+document.addEventListener('pointerdown', (e)=>{ tryAddPointFromClient(e.clientX, e.clientY, 'doc:pointerdown'); }, {passive:true});
+document.addEventListener('mousedown',    (e)=>{ tryAddPointFromClient(e.clientX, e.clientY, 'doc:mousedown'); }, {passive:true});
+document.addEventListener('click',        (e)=>{ tryAddPointFromClient(e.clientX, e.clientY, 'doc:click'); }, {passive:true});
+document.addEventListener('touchstart',   (e)=>{ const t=e.changedTouches?.[0]; if(t) tryAddPointFromClient(t.clientX, t.clientY, 'doc:touchstart'); }, {passive:true});
+document.addEventListener('touchend',     (e)=>{ const t=e.changedTouches?.[0]; if(t) tryAddPointFromClient(t.clientX, t.clientY, 'doc:touchend'); }, {passive:true});
 
 BTN_CLR.addEventListener('click', ()=>{
   points = []; seedReady = false; TX_CNT.textContent = '0';
@@ -364,7 +396,8 @@ document.getElementById('btnReset').addEventListener('click', ()=>{
 
 /* ---------- init ---------- */
 function init(){
-  resizeSeedCanvasForDPR();
+  // 첫 그리기
+  drawSeedBoard();
   setupThree();
 }
 init();
